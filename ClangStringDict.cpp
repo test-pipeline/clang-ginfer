@@ -31,6 +31,8 @@ static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 // A help message for this specific tool can be added afterwards.
 static cl::extrahelp MoreHelp("\nTakes a compilation database and spits out CString Literals in source files\n");
 
+
+// nDPI specific matcher
 StatementMatcher StrcmpMatcher = stringLiteral(
         hasAncestor(
                 callExpr(
@@ -39,41 +41,69 @@ StatementMatcher StrcmpMatcher = stringLiteral(
                                    hasDeclaration(
                                            namedDecl(anyOf(
                                                    hasName("strcmp"),
+                                                   hasName("__builtin_strcmp"),
                                                    hasName("strncmp"),
-                                                   hasName("memcmp")
+                                                   hasName("__builtin_strncmp"),
+                                                   hasName("memcmp"),
+                                                   hasName("__builtin_memcmp"),
+                                                   hasName("memmove"),
+                                                   hasName("__builtin_memmove"),
+                                                   hasName("unaligned_memcpy"),
+                                                   hasName("unaligned_memcmp")
                                            )
                                            ))))))).bind("strcmp");
 
-StatementMatcher IntLitMatcher = integerLiteral(
+// libxml2 specific matcher
+StatementMatcher xmlcharMatcher = stringLiteral(
         hasAncestor(
-                ifStmt())).bind("intlit");
+                callExpr(
+                        hasDescendant(
+                                declRefExpr(
+                                        hasDeclaration(
+                                                namedDecl(anyOf(
+                                                        hasName("xmlBufferWriteChar"),
+                                                        hasName("xmlOutputBufferWrite")
+                                                )
+                                                )
+                                        )
+                                )
+                        )
+                )
+        )
+).bind("xml");
 
-//StatementMatcher CaseStmtIntMatcher = integerLiteral(
-//        hasParent(
-//                caseStmt())).bind("caseintlit");
-//
-//StatementMatcher CaseStmtStrMatcher = stringLiteral(
-//        hasParent(
-//                caseStmt())).bind("casestrlit");
+// woff2 specific matcher
+DeclarationMatcher woff2constintMatcher = varDecl(
+        allOf(
+                hasType(isConstQualified()),
+                hasDescendant(integerLiteral().bind("woff2int")))
+);
 
-//TypeMatcher RecordMatcher = recordType();
-//        hasDeclaration(
-//                namedDecl(
-//                        matchesName("*header*")
-//                )
-//        )).bind("recordtype");
+// re2 specific matcher
+StatementMatcher re2charlitMatcher = characterLiteral(
+        hasAncestor(
+                cxxMethodDecl()
+        )
+).bind("re2char");
 
-//StatementMatcher HeaderRecMathcer = namedDecl(
-//        allOf(
-//                matchesName("*header*"),
-//                hasType(
-//                        recordType()
-//                ))).bind("headerstruct");
+// Generic
+StatementMatcher IntLitMatcher = integerLiteral(anyOf(
+        hasParent(binaryOperator(hasAncestor(ifStmt()))),
+        hasAncestor(caseStmt())
+//        hasParent(callExpr())
+)).bind("intlit");
 
-DeclarationMatcher HeaderRecMatcher = namedDecl(
-        matchesName(".*header.*"),
-        recordDecl()
-        ).bind("headerstruct");
+StatementMatcher StrLitMatcher = stringLiteral(anyOf(
+        hasParent(binaryOperator(hasAncestor(ifStmt()))),
+        hasParent(caseStmt())
+//        hasParent(callExpr())
+)).bind("strlit");
+
+StatementMatcher CharLitMatcher = characterLiteral(anyOf(
+        hasParent(binaryOperator(hasAncestor(ifStmt()))),
+        hasParent(caseStmt())
+//        hasParent(callExpr())
+)).bind("charlit");
 
 class MatchPrinter : public MatchFinder::MatchCallback {
 public :
@@ -84,10 +114,10 @@ public :
         llvm::outs() << "\"" + token + "\"" << "\n";
     }
 
-    void formatIntLiteral(const IntegerLiteral *IL) {
-        std::string inString = IL->getValue().toString(16, false);
+    void prettyPrintIntString(std::string inString) {
         if (inString.empty())
             return;
+#if 1
         size_t inStrLen = inString.size();
         if (inStrLen % 2) {
             inString.insert(0, "0");
@@ -96,21 +126,36 @@ public :
         for (size_t i = 0; i < (2 * inStrLen); i+=4) {
             inString.insert(i, "\\x");
         }
+#else
+        inString.insert(0, "0x");
+#endif
         printToken(inString);
     }
 
+    void formatIntLiteral(const IntegerLiteral *IL) {
+        std::string inString = IL->getValue().toString(16, false);
+        prettyPrintIntString(inString);
+    }
+
+    void formatCharLiteral(const CharacterLiteral *CL) {
+        unsigned value = CL->getValue();
+        std::string valString = llvm::APInt(8, value).toString(16, false);
+        prettyPrintIntString(valString);
+    }
+
     virtual void run(const MatchFinder::MatchResult &Result) {
-        if (const StringLiteral *SL = Result.Nodes.getNodeAs<clang::StringLiteral>("strcmp"))
+        if (const clang::StringLiteral *SL = Result.Nodes.getNodeAs<clang::StringLiteral>("strcmp"))
             printToken(SL->getString());
-//        if (const StringLiteral *SL = Result.Nodes.getNodeAs<clang::StringLiteral>("casestrlit"))
-//            printToken(SL->getString());
-        if (const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("intlit"))
+        if (const clang::StringLiteral *SL = Result.Nodes.getNodeAs<clang::StringLiteral>("strlit"))
+            printToken(SL->getString());
+        if (const clang::IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("intlit"))
             formatIntLiteral(IL);
-//        if (const IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("caseintlit"))
-//            formatIntLiteral(IL);
-        if (const NamedDecl *ND = Result.Nodes.getNodeAs<clang::NamedDecl>("headerstruct")) {
-            printToken(ND->getName());
-        }
+        if (const clang::StringLiteral *SL = Result.Nodes.getNodeAs<clang::StringLiteral>("xml"))
+            printToken(SL->getString());
+        if (const clang::IntegerLiteral *IL = Result.Nodes.getNodeAs<clang::IntegerLiteral>("woff2int"))
+            formatIntLiteral(IL);
+        if (const clang::CharacterLiteral *CL = Result.Nodes.getNodeAs<clang::CharacterLiteral>("charlit"))
+            formatCharLiteral(CL);
     }
 };
 
@@ -121,10 +166,10 @@ int main(int argc, const char **argv) {
     MatchPrinter Printer;
     MatchFinder Finder;
     Finder.addMatcher(IntLitMatcher, &Printer);
+    Finder.addMatcher(StrLitMatcher, &Printer);
+    Finder.addMatcher(CharLitMatcher, &Printer);
     Finder.addMatcher(StrcmpMatcher, &Printer);
-//    Finder.addMatcher(CaseStmtIntMatcher, &Printer);
-//    Finder.addMatcher(CaseStmtStrMatcher, &Printer);
-//    Finder.addMatcher(HeaderRecMatcher, &Printer);
-
+//    Finder.addMatcher(xmlcharMatcher, &Printer);
+//    Finder.addMatcher(woff2constintMatcher, &Printer);
     return Tool.run(newFrontendActionFactory(&Finder).get());
 }
